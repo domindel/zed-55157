@@ -7844,19 +7844,81 @@ fn ai_page(cx: &App) -> SettingsPage {
                 metadata: None,
                 files: USER | PROJECT,
             }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Threads Sidebar Side",
-                description: "Which side of the window the threads sidebar appears on.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("agent.sidebar_side"),
-                    pick: |settings_content| settings_content.agent.as_ref()?.sidebar_side.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.agent.get_or_insert_default().sidebar_side = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
+            SettingsPageItem::DynamicItem(DynamicItem {
+                discriminant: SettingItem {
+                    title: "Threads Sidebar Side",
+                    description: "Which side of the window the threads sidebar appears on, or whether it is embedded in the agent panel.",
+                    field: Box::new(SettingField {
+                        organization_override: None,
+                        json_path: Some("agent.sidebar_side"),
+                        pick: |settings_content| {
+                            settings_content.agent.as_ref()?.sidebar_side.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.agent.get_or_insert_default().sidebar_side = value;
+                        },
+                    }),
+                    metadata: None,
+                    files: USER,
+                },
+                // Indices match the `SidebarDockPosition` declaration order
+                // (Left, Right, InAgentPanel); the auto-inline sub-options only
+                // apply to the embedded ("In Agent Panel") layout.
+                pick_discriminant: |settings_content| {
+                    Some(settings_content.agent.as_ref()?.sidebar_side? as usize)
+                },
+                fields: vec![
+                    vec![],
+                    vec![],
+                    vec![
+                        SettingItem {
+                            title: "Auto-Inline When Wide",
+                            description: "Switch the embedded threads sidebar to a side-by-side layout once the agent panel is wide enough. The threads list docks to the same side as the agent panel.",
+                            field: Box::new(SettingField {
+                                organization_override: None,
+                                json_path: Some("agent.sidebar_auto_inline_when_wide"),
+                                pick: |settings_content| {
+                                    settings_content
+                                        .agent
+                                        .as_ref()?
+                                        .sidebar_auto_inline_when_wide
+                                        .as_ref()
+                                },
+                                write: |settings_content, value, _| {
+                                    settings_content
+                                        .agent
+                                        .get_or_insert_default()
+                                        .sidebar_auto_inline_when_wide = value;
+                                },
+                            }),
+                            metadata: None,
+                            files: USER,
+                        },
+                        SettingItem {
+                            title: "Auto-Inline Width",
+                            description: "Minimum agent panel width, in pixels, at which the embedded threads sidebar switches to a side-by-side layout.",
+                            field: Box::new(SettingField {
+                                organization_override: None,
+                                json_path: Some("agent.sidebar_auto_inline_min_width"),
+                                pick: |settings_content| {
+                                    settings_content
+                                        .agent
+                                        .as_ref()?
+                                        .sidebar_auto_inline_min_width
+                                        .as_ref()
+                                },
+                                write: |settings_content, value, _| {
+                                    settings_content
+                                        .agent
+                                        .get_or_insert_default()
+                                        .sidebar_auto_inline_min_width = value;
+                                },
+                            }),
+                            metadata: None,
+                            files: USER,
+                        },
+                    ],
+                ],
             }),
         ]
     }

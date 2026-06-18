@@ -208,6 +208,8 @@ pub struct AgentSettings {
     pub dock: DockPosition,
     pub flexible: bool,
     pub sidebar_side: SidebarDockPosition,
+    pub sidebar_auto_inline_when_wide: bool,
+    pub sidebar_auto_inline_min_width: Pixels,
     pub default_width: Pixels,
     pub default_height: Pixels,
     pub max_content_width: Option<Pixels>,
@@ -269,7 +271,12 @@ impl AgentSettings {
         match self.sidebar_side {
             SidebarDockPosition::Left => SidebarSide::Left,
             SidebarDockPosition::Right => SidebarSide::Right,
+            SidebarDockPosition::InAgentPanel => SidebarSide::Left,
         }
+    }
+
+    pub fn sidebar_in_agent_panel(&self) -> bool {
+        self.sidebar_side == SidebarDockPosition::InAgentPanel
     }
 
     pub fn set_message_editor_max_lines(&self) -> usize {
@@ -729,6 +736,10 @@ impl Settings for AgentSettings {
             button: agent.button.unwrap(),
             dock: agent.dock.unwrap(),
             sidebar_side: agent.sidebar_side.unwrap(),
+            sidebar_auto_inline_when_wide: agent.sidebar_auto_inline_when_wide.unwrap_or(false),
+            sidebar_auto_inline_min_width: px(
+                agent.sidebar_auto_inline_min_width.unwrap_or(700.0),
+            ),
             default_width: px(agent.default_width.unwrap()),
             default_height: px(agent.default_height.unwrap()),
             max_content_width: if agent.limit_content_width.unwrap() {

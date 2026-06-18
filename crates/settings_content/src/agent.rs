@@ -31,6 +31,8 @@ pub enum SidebarDockPosition {
     Left,
     /// Always show the sidebar on the right side.
     Right,
+    /// Embed the sidebar inside the agent panel, above the conversation.
+    InAgentPanel,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -211,6 +213,19 @@ pub struct AgentSettingsContent {
     ///
     /// Default: left
     pub sidebar_side: Option<SidebarDockPosition>,
+    /// When the threads sidebar is embedded in the agent panel
+    /// (`sidebar_side = "in_agent_panel"`), automatically switch to a
+    /// side-by-side layout when the panel is wide enough. The threads list
+    /// docks to the same side as the agent panel.
+    ///
+    /// Default: false
+    pub sidebar_auto_inline_when_wide: Option<bool>,
+    /// When `sidebar_auto_inline_when_wide` is enabled, the minimum panel
+    /// width in pixels at which the threads sidebar switches to side-by-side.
+    ///
+    /// Default: 700
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub sidebar_auto_inline_min_width: Option<f32>,
     /// Default width in pixels when the agent panel is docked to the left or right.
     ///
     /// Default: 640

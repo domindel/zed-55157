@@ -2,11 +2,12 @@ use crate::{
     ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
     sidebar_side_context_menu,
 };
+use agent_settings::AgentSettings;
 use gpui::{
     Anchor, AnyView, App, Context, Decorations, Entity, IntoElement, ParentElement, Render,
     SharedString, Styled, Subscription, WeakEntity, Window,
 };
-use settings::{SettingsContent, update_settings_file};
+use settings::{SettingsContent, Settings as _, update_settings_file};
 use std::{any::TypeId, sync::Arc};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
 use ui::{ContextMenu, Divider, IconPosition, Indicator, Tooltip, prelude::*, right_click_menu};
@@ -80,6 +81,7 @@ struct SidebarStatus {
 
 impl SidebarStatus {
     fn query(multi_workspace: &Option<WeakEntity<MultiWorkspace>>, cx: &App) -> Self {
+        let is_in_agent_panel = AgentSettings::get_global(cx).sidebar_in_agent_panel();
         multi_workspace
             .as_ref()
             .and_then(|mw| mw.upgrade())
@@ -90,10 +92,13 @@ impl SidebarStatus {
                     open: mw.sidebar_open() && enabled,
                     side: mw.sidebar_side(cx),
                     has_notifications: mw.sidebar_has_notifications(cx),
-                    show_toggle: enabled,
+                    show_toggle: enabled && !is_in_agent_panel,
                 }
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|| Self {
+                show_toggle: !is_in_agent_panel,
+                ..Default::default()
+            })
     }
 }
 

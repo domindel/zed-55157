@@ -71,9 +71,10 @@ pub fn sidebar_side_context_menu(
     right_click_menu(id).menu(move |window, cx| {
         let fs = <dyn fs::Fs>::global(cx);
         ContextMenu::build(window, cx, move |mut menu, _, _cx| {
-            let positions: [(SidebarDockPosition, &str); 2] = [
+            let positions: [(SidebarDockPosition, &str); 3] = [
                 (SidebarDockPosition::Left, "Left"),
                 (SidebarDockPosition::Right, "Right"),
+                (SidebarDockPosition::InAgentPanel, "In Agent Panel"),
             ];
             for (position, label) in positions {
                 let fs = fs.clone();
@@ -86,6 +87,7 @@ pub fn sidebar_side_context_menu(
                         let side = match position {
                             SidebarDockPosition::Left => "left",
                             SidebarDockPosition::Right => "right",
+                            SidebarDockPosition::InAgentPanel => "in_agent_panel",
                         };
                         telemetry::event!("Sidebar Side Changed", side = side);
                         settings::update_settings_file(fs.clone(), cx, move |settings, _cx| {
@@ -417,6 +419,13 @@ impl MultiWorkspace {
             return;
         }
 
+        if AgentSettings::get_global(cx).sidebar_in_agent_panel() {
+            // Sidebar is embedded in the agent panel. The AgentPanel's own
+            // on_action handler for ToggleWorkspaceSidebar handles show/hide.
+            // Nothing to do at the workspace level.
+            return;
+        }
+
         if self.sidebar_open() {
             self.close_sidebar(window, cx);
         } else {
@@ -444,12 +453,25 @@ impl MultiWorkspace {
             return;
         }
 
-        if self.sidebar_open() {
-            let sidebar_is_focused = self
-                .sidebar
-                .as_ref()
-                .is_some_and(|s| s.focus_handle(cx).contains_focused(window, cx));
+        let sidebar_is_focused = self
+            .sidebar
+            .as_ref()
+            .is_some_and(|s| s.focus_handle(cx).contains_focused(window, cx));
 
+        if AgentSettings::get_global(cx).sidebar_in_agent_panel() {
+            if sidebar_is_focused {
+                self.restore_previous_focus(false, window, cx);
+            } else {
+                self.previous_focus_handle = window.focused(cx);
+                if let Some(sidebar) = &self.sidebar {
+                    sidebar.prepare_for_focus(window, cx);
+                    sidebar.focus(window, cx);
+                }
+            }
+            return;
+        }
+
+        if self.sidebar_open() {
             if sidebar_is_focused {
                 self.restore_previous_focus(false, window, cx);
             } else {
@@ -470,9 +492,13 @@ impl MultiWorkspace {
     }
 
     pub fn open_sidebar(&mut self, cx: &mut Context<Self>) {
-        let side = match self.sidebar_side(cx) {
-            SidebarSide::Left => "left",
-            SidebarSide::Right => "right",
+        let side = if AgentSettings::get_global(cx).sidebar_in_agent_panel() {
+            "in_agent_panel"
+        } else {
+            match self.sidebar_side(cx) {
+                SidebarSide::Left => "left",
+                SidebarSide::Right => "right",
+            }
         };
         telemetry::event!("Sidebar Toggled", action = "open", side = side);
         self.apply_open_sidebar(cx);
@@ -498,9 +524,13 @@ impl MultiWorkspace {
     }
 
     pub fn close_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let side = match self.sidebar_side(cx) {
-            SidebarSide::Left => "left",
-            SidebarSide::Right => "right",
+        let side = if AgentSettings::get_global(cx).sidebar_in_agent_panel() {
+            "in_agent_panel"
+        } else {
+            match self.sidebar_side(cx) {
+                SidebarSide::Left => "left",
+                SidebarSide::Right => "right",
+            }
         };
         telemetry::event!("Sidebar Toggled", action = "close", side = side);
         self.sidebar_open = false;
@@ -2106,7 +2136,11 @@ impl Render for MultiWorkspace {
         let sidebar_side = self.sidebar_side(cx);
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
 
-        let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
+        let sidebar_in_panel = AgentSettings::get_global(cx).sidebar_in_agent_panel();
+        let sidebar: Option<AnyElement> = if multi_workspace_enabled
+            && self.sidebar_open()
+            && !sidebar_in_panel
+        {
             self.sidebar.as_ref().map(|sidebar_handle| {
                 let weak = cx.weak_entity();
 

@@ -76,10 +76,10 @@ use feature_flags::{
 
 use fs::Fs;
 use gpui::{
-    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
-    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
-    pulsating_between,
+    Action, Anchor, Animation, AnimationExt, AnyElement, AnyView, App, AsyncWindowContext,
+    ClipboardItem, DefiniteLength, DragMoveEvent, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, KeyContext, MouseButton, Pixels, PlatformDisplay, Subscription, Task,
+    TaskExt, WeakEntity, WindowHandle, canvas, deferred, prelude::*, pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
@@ -107,6 +107,12 @@ use workspace::{
 const AGENT_PANEL_KEY: &str = "agent_panel";
 const MIN_PANEL_WIDTH: Pixels = px(300.);
 const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
+const DEFAULT_SIDEBAR_SPLIT_RATIO: f32 = 0.35;
+const SIDEBAR_SPLIT_HANDLE_SIZE: f32 = 6.0;
+
+#[derive(Clone)]
+struct DraggedSidebarSplit;
+
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
 const TERMINAL_AGENT_TELEMETRY_ID: &str = "terminal";
 const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[
@@ -355,6 +361,8 @@ struct SerializedAgentPanel {
     last_active_terminal_id: Option<String>,
     #[serde(default)]
     new_draft_thread_id: Option<ThreadId>,
+    #[serde(default)]
+    sidebar_split_ratio: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1182,6 +1190,13 @@ pub struct AgentPanel {
     _active_draft_reclaim_observation: Option<Subscription>,
     _thread_metadata_store_subscription: Subscription,
     last_context_source: Option<AgentContextSource>,
+    sidebar_split_ratio: f32,
+    sidebar_split_visible: bool,
+    /// Last rendered width of the panel, measured during paint so the embedded
+    /// threads sidebar can decide whether the panel is wide enough to switch to
+    /// a side-by-side layout. Written by a measuring `canvas` and read on the
+    /// next frame.
+    panel_width: Rc<Cell<Option<Pixels>>>,
 
     is_active: bool,
 }
@@ -1252,6 +1267,7 @@ impl AgentPanel {
             .as_ref()
             .map(|draft| draft.read(cx).thread_id);
 
+        let sidebar_split_ratio = self.sidebar_split_ratio;
         let kvp = KeyValueStore::global(cx);
         self.pending_serialization = Some(cx.background_spawn(async move {
             save_serialized_panel(
@@ -1262,6 +1278,7 @@ impl AgentPanel {
                     last_active_thread,
                     last_active_terminal_id,
                     new_draft_thread_id,
+                    sidebar_split_ratio: Some(sidebar_split_ratio),
                 },
                 kvp,
             )
@@ -1419,6 +1436,9 @@ impl AgentPanel {
 
                     if let Some(serialized_panel) = &serialized_panel {
                         panel.last_created_entry_kind = serialized_panel.last_created_entry_kind;
+                        if let Some(ratio) = serialized_panel.sidebar_split_ratio {
+                            panel.sidebar_split_ratio = ratio.clamp(0.1, 0.9);
+                        }
                     } else if let Some(entry_kind) = global_last_created_entry_kind {
                         panel.last_created_entry_kind = entry_kind;
                     }
@@ -1589,6 +1609,9 @@ impl AgentPanel {
             _active_draft_reclaim_observation: None,
             _thread_metadata_store_subscription,
             last_context_source: None,
+            sidebar_split_ratio: DEFAULT_SIDEBAR_SPLIT_RATIO,
+            sidebar_split_visible: true,
+            panel_width: Rc::new(Cell::new(None)),
             is_active: false,
         };
 
@@ -5648,7 +5671,7 @@ impl AgentPanel {
             .with_handle(self.agent_panel_menu_handle.clone())
             .menu({
                 move |window, cx| {
-                    Some(ContextMenu::build(window, cx, |mut menu, _window, _| {
+                    Some(ContextMenu::build(window, cx, |mut menu, _window, app_cx| {
                         menu = menu.context(menu_action_context.clone());
 
                         if can_regenerate_thread_title {
@@ -5746,10 +5769,16 @@ impl AgentPanel {
                             menu = menu.action("Profiles", Box::new(ManageProfiles::default()));
                         }
 
-                        menu = menu
-                            .action("Settings", Box::new(OpenSettings))
-                            .separator()
-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
+                        let sidebar_in_panel =
+                            AgentSettings::get_global(app_cx).sidebar_in_agent_panel();
+
+                        menu = menu.action("Settings", Box::new(OpenSettings));
+
+                        if !sidebar_in_panel {
+                            menu = menu
+                                .separator()
+                                .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
+                        }
 
                         if has_auth_methods || supports_logout {
                             menu = menu.separator()
@@ -5765,6 +5794,72 @@ impl AgentPanel {
                     }))
                 }
             })
+    }
+
+    fn current_panel_width(&self, _cx: &App) -> Option<Pixels> {
+        // Measured from the actual rendered bounds (see the measuring `canvas`
+        // in `render`) rather than the dock size-state, which is `None` when
+        // the panel uses flexible (proportional) sizing.
+        self.panel_width.get()
+    }
+
+    fn get_embedded_sidebar_view(&self, cx: &App) -> Option<AnyView> {
+        if !AgentSettings::get_global(cx).sidebar_in_agent_panel() {
+            return None;
+        }
+        let workspace = self.workspace.upgrade()?;
+        let multi_workspace = workspace.read(cx).multi_workspace()?.upgrade()?;
+        multi_workspace.read(cx).sidebar().map(|s| s.to_any())
+    }
+
+    fn render_sidebar_split_handle_horizontal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let border_color = cx.theme().colors().border;
+        div()
+            .id("sidebar-split-handle-h-container")
+            .relative()
+            .h_full()
+            .w(px(1.))
+            .flex_shrink_0()
+            .bg(border_color)
+            .child(deferred(
+                div()
+                    .id("sidebar-split-handle-h")
+                    .absolute()
+                    .left(px(-SIDEBAR_SPLIT_HANDLE_SIZE / 2.0))
+                    .w(px(SIDEBAR_SPLIT_HANDLE_SIZE))
+                    .h_full()
+                    .cursor_col_resize()
+                    .on_drag(DraggedSidebarSplit, |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| gpui::Empty)
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+            ))
+    }
+
+    fn render_sidebar_split_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let border_color = cx.theme().colors().border;
+        div()
+            .id("sidebar-split-handle-container")
+            .relative()
+            .w_full()
+            .h(px(1.))
+            .flex_shrink_0()
+            .bg(border_color)
+            .child(deferred(
+                div()
+                    .id("sidebar-split-handle")
+                    .absolute()
+                    .top(px(-SIDEBAR_SPLIT_HANDLE_SIZE / 2.0))
+                    .w_full()
+                    .h(px(SIDEBAR_SPLIT_HANDLE_SIZE))
+                    .cursor_row_resize()
+                    .on_drag(DraggedSidebarSplit, |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| gpui::Empty)
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+            ))
     }
 
     fn render_toolbar_back_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6167,6 +6262,10 @@ impl AgentPanel {
                 .with_handle(self.new_thread_menu_handle.clone())
                 .menu(move |window, cx| new_thread_menu_builder(window, cx));
 
+            let sidebar_in_panel =
+                AgentSettings::get_global(cx).sidebar_in_agent_panel();
+            let sidebar_visible = self.sidebar_split_visible;
+
             base_container
                 .child(
                     h_flex()
@@ -6194,6 +6293,33 @@ impl AgentPanel {
                         .gap_1()
                         .pl_1()
                         .pr_1()
+                        .when(sidebar_in_panel, |this| {
+                            let icon = if sidebar_visible {
+                                IconName::ThreadsSidebarLeftOpen
+                            } else {
+                                IconName::ThreadsSidebarLeftClosed
+                            };
+                            this.child(
+                                IconButton::new("toggle-threads-sidebar", icon)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(move |_, cx| {
+                                        Tooltip::for_action(
+                                            if sidebar_visible {
+                                                "Hide Threads"
+                                            } else {
+                                                "Show Threads"
+                                            },
+                                            &ToggleWorkspaceSidebar,
+                                            cx,
+                                        )
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_split_visible =
+                                            !this.sidebar_split_visible;
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
@@ -6508,6 +6634,25 @@ impl Render for AgentPanel {
             .size_full()
             .justify_between()
             .bg(cx.theme().colors().panel_background)
+            .child({
+                let panel_width = self.panel_width.clone();
+                canvas(
+                    move |bounds, window, _| {
+                        let width = bounds.size.width;
+                        if width > px(0.) && panel_width.get() != Some(width) {
+                            panel_width.set(Some(width));
+                            // Re-render so the embedded sidebar layout can
+                            // re-evaluate against the new width. Guarded by the
+                            // change check above, so this can't loop once the
+                            // width settles.
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+            })
             .on_action(cx.listener(|this, action: &NewThread, window, cx| {
                 this.new_thread(action, window, cx);
             }))
@@ -6540,21 +6685,179 @@ impl Render for AgentPanel {
                     })
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleWorkspaceSidebar, _, cx| {
+                if AgentSettings::get_global(cx).sidebar_in_agent_panel() {
+                    this.sidebar_split_visible = !this.sidebar_split_visible;
+                    cx.notify();
+                }
+            }))
             .child(self.render_toolbar(window, cx))
             .children(self.render_new_user_onboarding(window, cx))
-            .map(|parent| match self.visible_surface() {
-                VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
-                    parent.child(self.render_no_project_state(cx))
-                }
-                VisibleSurface::Uninitialized => parent,
-                VisibleSurface::AgentThread(conversation_view) => parent
-                    .child(conversation_view.clone())
-                    .child(self.render_drag_target(cx)),
-                VisibleSurface::Terminal(terminal_view) => parent
-                    .child(terminal_view.clone())
-                    .child(self.render_drag_target(cx)),
-                VisibleSurface::Configuration(configuration) => {
-                    parent.children(configuration.cloned())
+            .map(|parent| {
+                let embedded_sidebar = self.get_embedded_sidebar_view(cx);
+                let show_split = embedded_sidebar.is_some()
+                    && !matches!(self.visible_surface(), VisibleSurface::Configuration(_));
+
+                if show_split && self.sidebar_split_visible {
+                    let settings = AgentSettings::get_global(cx);
+                    let panel_width = self.current_panel_width(cx);
+                    let wide_enough = panel_width
+                        .is_some_and(|w| w >= settings.sidebar_auto_inline_min_width);
+                    let use_horizontal = settings.sidebar_auto_inline_when_wide && wide_enough;
+                    // The threads list docks to the same side as the agent panel.
+                    let sidebar_on_right =
+                        agent_panel_dock_position(cx) == DockPosition::Right;
+
+                    let sidebar_view = embedded_sidebar.unwrap();
+                    let split_ratio = self.sidebar_split_ratio;
+                    let other_ratio = 1.0 - split_ratio;
+
+                    let conversation_inner: AnyElement = match self.visible_surface() {
+                        VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
+                            self.render_no_project_state(cx).into_any_element()
+                        }
+                        VisibleSurface::Uninitialized => div().into_any_element(),
+                        VisibleSurface::AgentThread(conversation_view) => {
+                            conversation_view.clone().into_any_element()
+                        }
+                        VisibleSurface::Terminal(terminal_view) => {
+                            terminal_view.clone().into_any_element()
+                        }
+                        VisibleSurface::Configuration(_) => unreachable!(),
+                    };
+
+                    let split_container = if use_horizontal {
+                        let sidebar_pane = v_flex()
+                            .id("sidebar-in-panel")
+                            .h_full()
+                            .flex_basis(DefiniteLength::Fraction(split_ratio))
+                            .flex_shrink_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(sidebar_view);
+                        let conversation_pane = v_flex()
+                            .id("conversation-in-panel")
+                            .h_full()
+                            .flex_basis(DefiniteLength::Fraction(other_ratio))
+                            .flex_shrink_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(conversation_inner);
+
+                        let row = h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .on_drag_move::<DraggedSidebarSplit>(cx.listener(
+                                move |this,
+                                 event: &DragMoveEvent<DraggedSidebarSplit>,
+                                 _,
+                                 cx| {
+                                    let bounds_width = event.bounds.size.width;
+                                    if bounds_width > px(0.) {
+                                        let new_x = event.event.position.x
+                                            - event.bounds.origin.x;
+                                        let fraction = new_x / bounds_width;
+                                        // When the sidebar is on the right, the
+                                        // handle position measures the
+                                        // conversation's width instead.
+                                        let sidebar_fraction = if sidebar_on_right {
+                                            1.0 - fraction
+                                        } else {
+                                            fraction
+                                        };
+                                        this.sidebar_split_ratio =
+                                            sidebar_fraction.clamp(0.1, 0.9);
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .on_drop::<DraggedSidebarSplit>(cx.listener(
+                                |this, _, _, cx| {
+                                    this.serialize(cx);
+                                },
+                            ));
+
+                        if sidebar_on_right {
+                            row.child(conversation_pane)
+                                .child(self.render_sidebar_split_handle_horizontal(cx))
+                                .child(sidebar_pane)
+                                .into_any_element()
+                        } else {
+                            row.child(sidebar_pane)
+                                .child(self.render_sidebar_split_handle_horizontal(cx))
+                                .child(conversation_pane)
+                                .into_any_element()
+                        }
+                    } else {
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .on_drag_move::<DraggedSidebarSplit>(cx.listener(
+                                |this,
+                                 event: &DragMoveEvent<DraggedSidebarSplit>,
+                                 _,
+                                 cx| {
+                                    let bounds_height = event.bounds.size.height;
+                                    if bounds_height > px(0.) {
+                                        let new_y = event.event.position.y
+                                            - event.bounds.origin.y;
+                                        this.sidebar_split_ratio =
+                                            (new_y / bounds_height).clamp(0.1, 0.9);
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .on_drop::<DraggedSidebarSplit>(cx.listener(
+                                |this, _, _, cx| {
+                                    this.serialize(cx);
+                                },
+                            ))
+                            .child(
+                                v_flex()
+                                    .id("sidebar-in-panel")
+                                    .flex_basis(DefiniteLength::Fraction(split_ratio))
+                                    .flex_shrink_1()
+                                    .min_h_0()
+                                    .overflow_hidden()
+                                    .child(sidebar_view),
+                            )
+                            .child(self.render_sidebar_split_handle(cx))
+                            .child(
+                                v_flex()
+                                    .id("conversation-in-panel")
+                                    .flex_basis(DefiniteLength::Fraction(other_ratio))
+                                    .flex_shrink_1()
+                                    .min_h_0()
+                                    .overflow_hidden()
+                                    .child(conversation_inner),
+                            )
+                            .into_any_element()
+                    };
+
+                    parent
+                        .child(split_container)
+                        .child(self.render_drag_target(cx))
+                } else {
+                    match self.visible_surface() {
+                        VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
+                            parent.child(self.render_no_project_state(cx))
+                        }
+                        VisibleSurface::Uninitialized => parent,
+                        VisibleSurface::AgentThread(conversation_view) => parent
+                            .child(conversation_view.clone())
+                            .child(self.render_drag_target(cx)),
+                        VisibleSurface::Terminal(terminal_view) => parent
+                            .child(terminal_view.clone())
+                            .child(self.render_drag_target(cx)),
+                        VisibleSurface::Configuration(configuration) => {
+                            parent.children(configuration.cloned())
+                        }
+                    }
                 }
             })
             .children(self.render_trial_end_upsell(window, cx));

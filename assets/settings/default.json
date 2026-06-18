@@ -1019,8 +1019,17 @@
     //
     // Default: true
     "flexible": true,
-    // Where to position the threads sidebar. Can be 'left' or 'right'.
+    // Where to position the threads sidebar. Can be 'left', 'right', or 'in_agent_panel'.
     "sidebar_side": "left",
+    // When the threads sidebar is embedded in the agent panel
+    // ('sidebar_side': 'in_agent_panel'), automatically switch to a side-by-side
+    // layout once the panel is wide enough. The threads list docks to the same
+    // side as the agent panel.
+    "sidebar_auto_inline_when_wide": true,
+    // Minimum agent panel width, in pixels, at which the embedded threads
+    // sidebar switches to a side-by-side layout (used when
+    // 'sidebar_auto_inline_when_wide' is enabled).
+    "sidebar_auto_inline_min_width": 700,
     // Default width when the agent panel is docked to the left or right.
     "default_width": 640,
     // Default height when the agent panel is docked to the bottom.

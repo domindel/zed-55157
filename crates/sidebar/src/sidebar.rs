@@ -7481,8 +7481,11 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_query = self.has_filter_query(cx);
-        let sidebar_on_left = self.side(cx) == SidebarSide::Left;
-        let sidebar_on_right = self.side(cx) == SidebarSide::Right;
+        // When embedded in the agent panel the sidebar is not at the edge of the
+        // window, so OS window controls and traffic lights must not appear here.
+        let in_agent_panel = AgentSettings::get_global(cx).sidebar_in_agent_panel();
+        let sidebar_on_left = !in_agent_panel && self.side(cx) == SidebarSide::Left;
+        let sidebar_on_right = !in_agent_panel && self.side(cx) == SidebarSide::Right;
         let not_fullscreen = !window.is_fullscreen();
         let traffic_lights = cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
         let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
@@ -7565,7 +7568,9 @@ impl Sidebar {
     }
 
     fn render_sidebar_toggle_button(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        let on_right = AgentSettings::get_global(_cx).sidebar_side() == SidebarSide::Right;
+        let settings = AgentSettings::get_global(_cx);
+        let on_right = settings.sidebar_side() == SidebarSide::Right;
+        let in_agent_panel = settings.sidebar_in_agent_panel();
 
         sidebar_side_context_menu("sidebar-toggle-menu", _cx)
             .anchor(if on_right {
@@ -7608,12 +7613,16 @@ impl Sidebar {
                             )
                             .into_any_element()
                     }))
-                    .on_click(|_, window, cx| {
-                        if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
-                            multi_workspace.update(cx, |multi_workspace, cx| {
-                                multi_workspace.close_sidebar(window, cx);
-                            });
-                        }
+                    .when(!in_agent_panel, |btn| {
+                        btn.on_click(|_, window, cx| {
+                            if let Some(multi_workspace) =
+                                window.root::<MultiWorkspace>().flatten()
+                            {
+                                multi_workspace.update(cx, |multi_workspace, cx| {
+                                    multi_workspace.close_sidebar(window, cx);
+                                });
+                            }
+                        })
                     })
             })
     }
@@ -7621,6 +7630,7 @@ impl Sidebar {
     fn render_sidebar_bottom_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_archive = matches!(self.view, SidebarView::Archive(..));
         let on_right = self.side(cx) == SidebarSide::Right;
+        let in_agent_panel = AgentSettings::get_global(cx).sidebar_in_agent_panel();
 
         h_flex()
             .p_1()
@@ -7628,7 +7638,9 @@ impl Sidebar {
             .when(on_right, |this| this.flex_row_reverse())
             .border_t_1()
             .border_color(cx.theme().colors().border)
-            .child(self.render_sidebar_toggle_button(cx))
+            .when(!in_agent_panel, |this| {
+                this.child(self.render_sidebar_toggle_button(cx))
+            })
             .child(
                 IconButton::new("history", IconName::Clock)
                     .icon_size(IconSize::Small)
@@ -8043,6 +8055,7 @@ impl Render for Sidebar {
 
         let no_open_projects = !self.contents.has_open_projects;
         let no_search_results = self.contents.entries.is_empty();
+        let in_agent_panel = AgentSettings::get_global(cx).sidebar_in_agent_panel();
 
         v_flex()
             .id("workspace-sidebar")
@@ -8077,10 +8090,11 @@ impl Render for Sidebar {
             }))
             .font(ui_font)
             .h_full()
-            .w(self.width)
+            .when(in_agent_panel, |el| el.w_full())
+            .when(!in_agent_panel, |el| el.w(self.width))
             .bg(bg)
-            .when(self.side(cx) == SidebarSide::Left, |el| el.border_r_1())
-            .when(self.side(cx) == SidebarSide::Right, |el| el.border_l_1())
+            .when(!in_agent_panel && self.side(cx) == SidebarSide::Left, |el| el.border_r_1())
+            .when(!in_agent_panel && self.side(cx) == SidebarSide::Right, |el| el.border_l_1())
             .border_color(color.border)
             .map(|this| match &self.view {
                 SidebarView::ThreadList => this
